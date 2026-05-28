@@ -3,6 +3,8 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { colorOf, clocksAsOf } from "@/lib/multiplayer";
 import type { MultiplayerGame } from "@/lib/types";
 
+export const preferredRegion = "sin1";
+
 /**
  * Claim victory because the opponent's clock has expired.
  *

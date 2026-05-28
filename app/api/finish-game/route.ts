@@ -4,6 +4,8 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import type { GameResult } from "@/lib/elo";
 import type { Game, PieceColor, Profile } from "@/lib/types";
 
+export const preferredRegion = "sin1";
+
 /**
  * Authoritatively completes a game and applies Elo.
  *

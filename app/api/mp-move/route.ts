@@ -4,6 +4,8 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { colorOf, terminalState } from "@/lib/multiplayer";
 import type { MultiplayerGame } from "@/lib/types";
 
+export const preferredRegion = "sin1";
+
 /**
  * Apply a move to a multiplayer game (server-authoritative).
  *

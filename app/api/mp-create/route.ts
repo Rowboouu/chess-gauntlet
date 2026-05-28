@@ -4,6 +4,8 @@ import { getTimeControl } from "@/lib/timeControls";
 import { START_FEN } from "@/lib/multiplayer";
 import type { PieceColor, Profile } from "@/lib/types";
 
+export const preferredRegion = "sin1";
+
 /**
  * Create a new multiplayer game. The creator is always seated as white in
  * the row (white_user_id is NOT NULL); their requested color is stored in

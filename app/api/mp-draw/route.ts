@@ -3,6 +3,8 @@ import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { colorOf } from "@/lib/multiplayer";
 import type { MultiplayerGame } from "@/lib/types";
 
+export const preferredRegion = "sin1";
+
 /**
  * Draw offer flow.
  *
