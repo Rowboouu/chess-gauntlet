@@ -55,6 +55,11 @@ export function MultiplayerGameClient({
   const [now, setNow] = useState<number>(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // Track which (if any) named action is in-flight, so we can disable the
+  // button and change its label — fixes the "did my click register?" issue.
+  const [busy, setBusy] = useState<
+    null | "offer" | "accept" | "decline" | "resign"
+  >(null);
 
   // Pre-move state (mirrors the bot-game hook's pattern).
   const [preMove, setPreMoveState] = useState<PreMove | null>(null);
@@ -68,6 +73,20 @@ export function MultiplayerGameClient({
   const claimedFlagRef = useRef(false);
 
   const myColor: PieceColor | null = colorOf(game, viewerId);
+
+  // ─── Refetch helper: belt-and-braces sync against the DB ────────────
+  // Postgres-changes doesn't backfill events fired before SUBSCRIBED, so we
+  // refetch the row on subscribe, on window focus, and on channel reconnect.
+  const gameIdRef = useRef(initialGame.id);
+  const refetch = useCallback(async () => {
+    const supabase = createClient();
+    const { data } = await supabase
+      .from("multiplayer_games")
+      .select("*")
+      .eq("id", gameIdRef.current)
+      .single<MultiplayerGame>();
+    if (data) setGame(data);
+  }, []);
 
   // ─── Realtime: subscribe to the game's UPDATE events ─────────────────
   useEffect(() => {
@@ -86,11 +105,23 @@ export function MultiplayerGameClient({
           setGame(payload.new as MultiplayerGame);
         },
       )
-      .subscribe();
+      .subscribe((status) => {
+        // On (re)connect, pull the latest row to fill any gap between when
+        // we mounted and when the subscription actually came online.
+        if (status === "SUBSCRIBED") void refetch();
+      });
+
+    // Refetch when the tab regains focus or the network reconnects, in case
+    // the channel dropped silently in the background.
+    const onFocus = () => void refetch();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onFocus);
     return () => {
       void supabase.removeChannel(channel);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onFocus);
     };
-  }, [game.id]);
+  }, [game.id, refetch]);
 
   // ─── Refresh server-rendered data when the game first goes live so the
   // opponent profile appears for the creator. ─────────────────────────
@@ -254,26 +285,36 @@ export function MultiplayerGameClient({
   const clearPreMove = useCallback(() => setPreMove(null), [setPreMove]);
 
   // ─── Action helpers ──────────────────────────────────────────────────
-  async function action(path: string, body: object) {
-    const res = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      setError(j.error ?? "Request failed");
-    } else {
-      setError(null);
+  async function action(
+    name: NonNullable<typeof busy>,
+    path: string,
+    body: object,
+  ) {
+    if (busy) return;
+    setBusy(name);
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setError(j.error ?? "Request failed");
+      } else {
+        setError(null);
+      }
+    } finally {
+      setBusy(null);
     }
   }
-  const resign = () => action("/api/mp-resign", { gameId: game.id });
+  const resign = () => action("resign", "/api/mp-resign", { gameId: game.id });
   const offerDraw = () =>
-    action("/api/mp-draw", { gameId: game.id, action: "offer" });
+    action("offer", "/api/mp-draw", { gameId: game.id, action: "offer" });
   const acceptDraw = () =>
-    action("/api/mp-draw", { gameId: game.id, action: "accept" });
+    action("accept", "/api/mp-draw", { gameId: game.id, action: "accept" });
   const declineDraw = () =>
-    action("/api/mp-draw", { gameId: game.id, action: "decline" });
+    action("decline", "/api/mp-draw", { gameId: game.id, action: "decline" });
 
   // ─── Derived display ─────────────────────────────────────────────────
   const sideToMove = (game.fen.split(" ")[1] ?? "w") as PieceColor;
@@ -379,6 +420,7 @@ export function MultiplayerGameClient({
           <Board
             fen={game.fen}
             orientation={orientation}
+            playerColor={myColor}
             onMove={onMove}
             interactive={interactive}
             acceptPreMoves={acceptPreMoves}
@@ -451,15 +493,17 @@ export function MultiplayerGameClient({
               <div className="mt-2 flex gap-2">
                 <button
                   onClick={acceptDraw}
-                  className="flex-1 rounded-lg border border-accent/60 bg-accent/20 py-1.5 text-sm font-semibold text-accent-strong hover:bg-accent/30"
+                  disabled={busy !== null}
+                  className="flex-1 rounded-lg border border-accent/60 bg-accent/20 py-1.5 text-sm font-semibold text-accent-strong transition-colors hover:bg-accent/30 disabled:opacity-50"
                 >
-                  Accept
+                  {busy === "accept" ? "Accepting…" : "Accept"}
                 </button>
                 <button
                   onClick={declineDraw}
-                  className="flex-1 rounded-lg border border-panel-border py-1.5 text-sm hover:border-accent/50"
+                  disabled={busy !== null}
+                  className="flex-1 rounded-lg border border-panel-border py-1.5 text-sm transition-colors hover:border-accent/50 disabled:opacity-50"
                 >
-                  Decline
+                  {busy === "decline" ? "Declining…" : "Decline"}
                 </button>
               </div>
             </div>
@@ -470,17 +514,22 @@ export function MultiplayerGameClient({
             <div className="flex flex-col gap-2 rounded-xl border border-panel-border bg-panel p-3">
               <button
                 onClick={offerDraw}
-                disabled={myOfferPending}
+                disabled={busy !== null || myOfferPending}
                 className="rounded-lg border border-panel-border py-2 text-sm transition-colors hover:border-accent/50 disabled:opacity-50"
               >
-                {myOfferPending ? "Draw offer sent…" : "Offer Draw"}
+                {busy === "offer"
+                  ? "Offering draw…"
+                  : myOfferPending
+                    ? "Draw offer sent ✓"
+                    : "Offer Draw"}
               </button>
-              <button
-                onClick={resign}
-                className="rounded-lg border border-red-900/50 bg-red-950/30 py-2 text-sm font-semibold text-red-300 hover:border-red-700 hover:bg-red-900/30"
-              >
-                Resign
-              </button>
+              <ConfirmingButton
+                disabled={busy !== null}
+                pendingLabel={busy === "resign" ? "Resigning…" : null}
+                label="Resign"
+                confirmLabel="Click again to confirm"
+                onConfirm={resign}
+              />
             </div>
           )}
 
@@ -544,6 +593,51 @@ export function MultiplayerGameClient({
         </aside>
       </main>
     </>
+  );
+}
+
+function ConfirmingButton({
+  label,
+  confirmLabel,
+  pendingLabel,
+  disabled,
+  onConfirm,
+}: {
+  label: string;
+  confirmLabel: string;
+  pendingLabel: string | null;
+  disabled?: boolean;
+  onConfirm: () => void | Promise<void>;
+}) {
+  const [armed, setArmed] = useState(false);
+
+  // Reset the confirm state if the user wanders away without committing.
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 4000);
+    return () => clearTimeout(t);
+  }, [armed]);
+
+  return (
+    <button
+      onClick={() => {
+        if (pendingLabel) return;
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        void onConfirm();
+        setArmed(false);
+      }}
+      disabled={disabled}
+      className={`rounded-lg border py-2 text-sm font-semibold transition-colors disabled:opacity-50 ${
+        armed
+          ? "border-red-500 bg-red-700/40 text-red-100"
+          : "border-red-900/50 bg-red-950/30 text-red-300 hover:border-red-700 hover:bg-red-900/30"
+      }`}
+    >
+      {pendingLabel ?? (armed ? confirmLabel : label)}
+    </button>
   );
 }
 

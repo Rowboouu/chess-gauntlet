@@ -126,6 +126,7 @@ export function GameClient({ game, bot }: { game: Game; bot: BotLevel }) {
           <Board
             fen={state.fen}
             orientation={game.player_color === "w" ? "white" : "black"}
+            playerColor={game.player_color}
             onMove={move}
             interactive={interactive}
             acceptPreMoves={acceptPreMoves}

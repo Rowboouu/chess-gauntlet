@@ -44,6 +44,11 @@ export async function middleware(request: NextRequest) {
   if (!user && !isPublic) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
+    // Preserve the path the user was trying to reach so /login can send them
+    // back after sign-in (critical for shared multiplayer invite links).
+    if (pathname && pathname !== "/") {
+      url.searchParams.set("next", pathname + (request.nextUrl.search || ""));
+    }
     return NextResponse.redirect(url);
   }
 

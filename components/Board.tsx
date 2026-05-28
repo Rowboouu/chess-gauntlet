@@ -3,10 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import type { PreMove } from "@/hooks/useChessGame";
+import type { PieceColor } from "@/lib/types";
 
 interface BoardProps {
   fen: string;
   orientation: "white" | "black";
+  /** The viewer's color. Only pieces of this color are draggable. */
+  playerColor: PieceColor | null;
   /** Apply a player move now. Returns true if it was legal/accepted. */
   onMove: (from: string, to: string, promotion?: string) => boolean;
   /** It's the player's turn — drags execute moves. */
@@ -39,6 +42,7 @@ const PREMOVE_MARK = { backgroundColor: "rgba(255, 159, 64, 0.55)" } as const;
 export function Board({
   fen,
   orientation,
+  playerColor,
   onMove,
   interactive,
   acceptPreMoves,
@@ -70,7 +74,7 @@ export function Board({
 
   return (
     <div
-      className="overflow-hidden rounded-xl border border-panel-border shadow-2xl"
+      className="overflow-hidden rounded-xl border border-panel-border shadow-2xl touch-none"
       onContextMenu={(e) => e.preventDefault()}
     >
       <Chessboard
@@ -79,6 +83,15 @@ export function Board({
           position: fen,
           boardOrientation: orientation,
           allowDragging: interactive || acceptPreMoves,
+          // Only let the viewer drag their own pieces — opponent pieces are
+          // not grabbable, which fixes the "I can drag my opponent's piece
+          // and it snaps back" weirdness.
+          canDragPiece: ({ piece }) => {
+            if (!playerColor) return false;
+            // `piece` is a {pieceType: "wP"|"bK"|...} object; first char = color.
+            const pColor = String(piece.pieceType ?? "")[0];
+            return pColor === playerColor;
+          },
           showNotation: true,
           animationDurationInMs: 200,
           darkSquareStyle: { backgroundColor: "#5b4a36" },
