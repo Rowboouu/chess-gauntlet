@@ -4,7 +4,7 @@ import { Title } from "@/components/Title";
 import { MenuButton } from "@/components/MenuButton";
 import { QuitButton } from "@/components/QuitButton";
 import { MAX_LEVEL } from "@/lib/bots";
-import type { Game, Profile } from "@/lib/types";
+import type { Game, MultiplayerGame, Profile } from "@/lib/types";
 
 export default async function HomePage() {
   const supabase = await createClient();
@@ -15,21 +15,49 @@ export default async function HomePage() {
   // Middleware guarantees a user here, but guard anyway.
   if (!user) return null;
 
-  const [{ data: profile }, { data: savedGame }] = await Promise.all([
-    supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", user.id)
-      .single<Profile>(),
-    supabase
-      .from("games")
-      .select("*")
-      .eq("user_id", user.id)
-      .eq("status", "in_progress")
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle<Game>(),
-  ]);
+  const [{ data: profile }, { data: savedBotGame }, { data: savedMpGame }] =
+    await Promise.all([
+      supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", user.id)
+        .single<Profile>(),
+      supabase
+        .from("games")
+        .select("*")
+        .eq("user_id", user.id)
+        .eq("status", "in_progress")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle<Game>(),
+      supabase
+        .from("multiplayer_games")
+        .select("*")
+        .or(`white_user_id.eq.${user.id},black_user_id.eq.${user.id}`)
+        .in("status", ["waiting", "in_progress"])
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle<MultiplayerGame>(),
+    ]);
+
+  // Pick the more-recently-touched of the two saved games to feature behind
+  // the "Continue" button.
+  const continueHref =
+    savedMpGame &&
+    (!savedBotGame ||
+      new Date(savedMpGame.updated_at).getTime() >
+        new Date(savedBotGame.updated_at).getTime())
+      ? `/mp/${savedMpGame.id}`
+      : savedBotGame
+        ? `/game/${savedBotGame.id}`
+        : undefined;
+  const continueSublabel = continueHref
+    ? continueHref.startsWith("/mp/")
+      ? savedMpGame?.status === "waiting"
+        ? "Waiting for opponent…"
+        : "Resume your multiplayer game"
+      : `Resume your ${savedBotGame!.mode} game`
+    : "No saved game in progress";
 
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-4 py-10">
@@ -56,15 +84,11 @@ export default async function HomePage() {
           sublabel="Climb the gauntlet or pick a difficulty"
         />
         <MenuButton
-          href={savedGame ? `/game/${savedGame.id}` : undefined}
-          disabled={!savedGame}
+          href={continueHref}
+          disabled={!continueHref}
           icon="▶"
           label="Continue"
-          sublabel={
-            savedGame
-              ? `Resume your ${savedGame.mode} game`
-              : "No saved game in progress"
-          }
+          sublabel={continueSublabel}
         />
         <MenuButton
           href="/leaderboard"
