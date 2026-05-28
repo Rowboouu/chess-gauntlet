@@ -61,7 +61,7 @@ export function GameClient({ game, bot }: { game: Game; bot: BotLevel }) {
     [game.id],
   );
 
-  const { state, move } = useChessGame({
+  const { state, move, preMove, queuePreMove, clearPreMove } = useChessGame({
     initialFen: game.fen,
     initialPgn: game.pgn || undefined,
     playerColor: game.player_color,
@@ -112,6 +112,11 @@ export function GameClient({ game, bot }: { game: Game; bot: BotLevel }) {
 
   const interactive =
     !state.isGameOver && !state.isThinking && state.turn === game.player_color;
+  // Pre-moves are queueable while the bot is thinking (or otherwise it's not
+  // the player's turn) and the game is still live.
+  const acceptPreMoves =
+    !state.isGameOver &&
+    (state.isThinking || state.turn !== game.player_color);
 
   return (
     <>
@@ -123,6 +128,10 @@ export function GameClient({ game, bot }: { game: Game; bot: BotLevel }) {
             orientation={game.player_color === "w" ? "white" : "black"}
             onMove={move}
             interactive={interactive}
+            acceptPreMoves={acceptPreMoves}
+            onPreMove={queuePreMove}
+            preMove={preMove}
+            onClearPreMove={clearPreMove}
           />
         </div>
         <GameStatus

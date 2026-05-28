@@ -31,6 +31,12 @@ export interface ChessGameState {
   inCheck: boolean;
 }
 
+export interface PreMove {
+  from: string;
+  to: string;
+  promotion?: string;
+}
+
 interface UseChessGameArgs {
   initialFen?: string;
   initialPgn?: string;
@@ -80,6 +86,16 @@ export function useChessGame({
     deriveState(gameRef.current, false, playerColor),
   );
 
+  // Pre-move: a player move queued while the bot is thinking. Stored in both
+  // state (for rendering) and a ref (so maybeEngineMove can read the latest
+  // value without re-creating its useCallback closure each pre-move change).
+  const [preMove, setPreMoveState] = useState<PreMove | null>(null);
+  const preMoveRef = useRef<PreMove | null>(null);
+  const commitPreMove = useCallback((pm: PreMove | null) => {
+    preMoveRef.current = pm;
+    setPreMoveState(pm);
+  }, []);
+
   // Keep latest callbacks without re-subscribing effects.
   const persistRef = useRef(onPersist);
   const endRef = useRef(onGameEnd);
@@ -108,6 +124,10 @@ export function useChessGame({
     return () => engine.terminate();
   }, []);
 
+  // Forward-declared ref so the engine cycle can re-trigger itself after a
+  // pre-move executes without forming a useCallback dependency loop.
+  const maybeEngineMoveRef = useRef<() => Promise<void>>(null as unknown as () => Promise<void>);
+
   const maybeEngineMove = useCallback(async () => {
     const game = gameRef.current;
     if (game.isGameOver()) return;
@@ -130,11 +150,36 @@ export function useChessGame({
       });
       playSound(soundForMove(mv, game));
       sync(false);
+
+      // Apply a queued pre-move if one is waiting and still legal. Illegal
+      // pre-moves (the bot's move changed the position) are silently discarded.
+      const pm = preMoveRef.current;
+      if (pm && !game.isGameOver() && game.turn() === playerColor) {
+        commitPreMove(null);
+        try {
+          const pmResult = game.move({
+            from: pm.from as Square,
+            to: pm.to as Square,
+            promotion: pm.promotion ?? "q",
+          });
+          if (pmResult) {
+            playSound(soundForMove(pmResult, game));
+            sync(false);
+            if (!game.isGameOver()) {
+              queueMicrotask(() => void maybeEngineMoveRef.current?.());
+            }
+          }
+        } catch {
+          // Pre-move illegal in the new position — drop it.
+        }
+      }
     } catch {
       // Engine failed — leave it as the player's read of the board.
       setState((s) => ({ ...s, isThinking: false }));
     }
-  }, [bot, playerColor, sync]);
+  }, [bot, playerColor, sync, commitPreMove]);
+
+  maybeEngineMoveRef.current = maybeEngineMove;
 
   // If it's the bot's move on load (e.g. player is black), let it move.
   useEffect(() => {
@@ -162,14 +207,37 @@ export function useChessGame({
       } catch {
         return false;
       }
+      // A direct move supersedes any queued pre-move.
+      commitPreMove(null);
       const next = sync(false);
       if (!next.isGameOver) {
         void maybeEngineMove();
       }
       return true;
     },
-    [playerColor, sync, maybeEngineMove],
+    [playerColor, sync, maybeEngineMove, commitPreMove],
   );
+
+  /**
+   * Queue a move to play automatically the moment it's the player's turn.
+   * Validates that the source actually holds a friendly piece — illegal
+   * pre-moves still get caught at execution time, but this rejects obvious
+   * mistakes upfront so the UI doesn't show a confusing highlight.
+   */
+  const queuePreMove = useCallback(
+    (from: string, to: string, promotion?: string): boolean => {
+      const game = gameRef.current;
+      if (game.isGameOver()) return false;
+      if (game.turn() === playerColor) return false; // it's our turn — just play it
+      const piece = game.get(from as Square);
+      if (!piece || piece.color !== playerColor) return false;
+      commitPreMove({ from, to, promotion });
+      return true;
+    },
+    [playerColor, commitPreMove],
+  );
+
+  const clearPreMove = useCallback(() => commitPreMove(null), [commitPreMove]);
 
   /** Legal destination squares for a given origin (for move hints). */
   const legalMovesFrom = useCallback((square: string): string[] => {
@@ -179,7 +247,7 @@ export function useChessGame({
       .map((m) => m.to);
   }, []);
 
-  return { state, move, legalMovesFrom };
+  return { state, move, legalMovesFrom, preMove, queuePreMove, clearPreMove };
 }
 
 function deriveState(
