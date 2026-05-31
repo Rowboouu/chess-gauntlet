@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { Chess, type Square } from "chess.js";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { colorOf, terminalState } from "@/lib/multiplayer";
+import { broadcastMpState } from "@/lib/realtime-broadcast";
 import type { MultiplayerGame } from "@/lib/types";
 
 export const preferredRegion = "sin1";
@@ -135,23 +136,37 @@ export async function POST(request: NextRequest) {
 
   const terminal = terminalState(chess);
 
-  const { error: uErr } = await admin
-    .from("multiplayer_games")
-    .update({
-      fen: chess.fen(),
-      pgn: chess.pgn(),
-      white_time_ms: newWhiteMs,
-      black_time_ms: newBlackMs,
-      // The opponent's clock starts now (or stops if the game just ended).
-      clock_running_since: terminal || !timed ? null : now.toISOString(),
-      draw_offer_by: null, // any move cancels a pending draw offer
-      updated_at: now.toISOString(),
-    })
-    .eq("id", game.id)
-    .eq("status", "in_progress");
+  const updates = {
+    fen: chess.fen(),
+    pgn: chess.pgn(),
+    white_time_ms: newWhiteMs,
+    black_time_ms: newBlackMs,
+    // The opponent's clock starts now (or stops if the game just ended).
+    clock_running_since: (terminal || !timed ? null : now.toISOString()) as
+      | string
+      | null,
+    draw_offer_by: null,
+    updated_at: now.toISOString(),
+  };
 
-  if (uErr) {
-    return NextResponse.json({ error: uErr.message }, { status: 500 });
+  // Parallelize the DB write and the fast-path broadcast. Opponent receives
+  // the broadcast in ~30-50 ms; postgres_changes echo lands later as a
+  // confirmation. We need to await the DB write so a failure surfaces;
+  // broadcast is fire-and-forget.
+  const [updateResult] = await Promise.all([
+    admin
+      .from("multiplayer_games")
+      .update(updates)
+      .eq("id", game.id)
+      .eq("status", "in_progress"),
+    broadcastMpState(game.id, { ...game, ...updates }),
+  ]);
+
+  if (updateResult.error) {
+    return NextResponse.json(
+      { error: updateResult.error.message },
+      { status: 500 },
+    );
   }
 
   if (terminal) {

@@ -135,6 +135,27 @@ export function MultiplayerGameClient({
 
       channel = supabase
         .channel(`mp:${game.id}`)
+        // Fast path — the server pushes a Realtime broadcast in parallel
+        // with the DB write, so this typically arrives ~100 ms before the
+        // postgres_changes echo below.
+        .on("broadcast", { event: "state" }, (msg) => {
+          const next = msg.payload as MultiplayerGame;
+          log("BROADCAST", {
+            status: next.status,
+            fen: next.fen,
+            updated_at: next.updated_at,
+          });
+          // Only apply if it's newer than what we have (the postgres_changes
+          // echo and broadcast can race).
+          setGame((prev) =>
+            new Date(next.updated_at).getTime() >
+            new Date(prev.updated_at).getTime()
+              ? next
+              : prev,
+          );
+        })
+        // Slow path / persistence confirmation — still useful for full-state
+        // sanity and for clients that join after a broadcast.
         .on(
           "postgres_changes",
           {
@@ -150,7 +171,12 @@ export function MultiplayerGameClient({
               fen: next.fen,
               updated_at: next.updated_at,
             });
-            setGame(next);
+            setGame((prev) =>
+              new Date(next.updated_at).getTime() >
+              new Date(prev.updated_at).getTime()
+                ? next
+                : prev,
+            );
           },
         )
         .subscribe((status, err) => {
@@ -265,14 +291,16 @@ export function MultiplayerGameClient({
         body: JSON.stringify({ gameId: game.id, from, to, promotion }),
       });
       if (!res.ok) {
-        // Realtime will resync truth; surface a brief error.
+        // The optimistic local state diverged from the server (e.g. opponent
+        // moved first in a race). Pull the truth.
+        void refetch();
         const j = await res.json().catch(() => ({}));
         setError(j.error ?? null);
       } else {
         setError(null);
       }
     },
-    [game.id],
+    [game.id, refetch],
   );
 
   useEffect(() => {
@@ -320,8 +348,18 @@ export function MultiplayerGameClient({
       if (!myColor || game.status !== "in_progress") return false;
       const sideToMove = (game.fen.split(" ")[1] ?? "w") as PieceColor;
       if (sideToMove !== myColor) return false;
-      // Local legality check (snap-back if illegal without a round-trip).
-      const c = new Chess(game.fen);
+
+      // Validate locally and build the new state. chess.js is the same
+      // ruleset the server runs, so its verdict matches what /api/mp-move
+      // will conclude. We commit this optimistically; the Realtime echo
+      // (or a refetch on 4xx) reconciles.
+      const c = new Chess();
+      try {
+        if (game.pgn) c.loadPgn(game.pgn);
+        else c.load(game.fen);
+      } catch {
+        return false;
+      }
       try {
         const r = c.move({
           from: from as Square,
@@ -332,11 +370,42 @@ export function MultiplayerGameClient({
       } catch {
         return false;
       }
+
+      // Compute the new clock state so the opponent's clock starts ticking
+      // here too — without this, the local clocksAsOf would keep ticking
+      // the mover's stored time against the old running-since, which looks
+      // wrong for the ~half-second before the server echoes.
+      const nowDate = new Date();
+      const nowStr = nowDate.toISOString();
+      let newWhiteMs = game.white_time_ms;
+      let newBlackMs = game.black_time_ms;
+      if (game.time_initial_ms > 0 && game.clock_running_since) {
+        const elapsed = Math.max(
+          0,
+          nowDate.getTime() - new Date(game.clock_running_since).getTime(),
+        );
+        if (myColor === "w") {
+          newWhiteMs = Math.max(0, game.white_time_ms - elapsed) + game.increment_ms;
+        } else {
+          newBlackMs = Math.max(0, game.black_time_ms - elapsed) + game.increment_ms;
+        }
+      }
+
+      setGame((prev) => ({
+        ...prev,
+        fen: c.fen(),
+        pgn: c.pgn(),
+        white_time_ms: newWhiteMs,
+        black_time_ms: newBlackMs,
+        clock_running_since: prev.time_initial_ms > 0 ? nowStr : null,
+        draw_offer_by: null,
+        updated_at: nowStr,
+      }));
       setPreMove(null);
       void postMove(from, to, promotion);
       return true;
     },
-    [game.fen, game.status, myColor, postMove, setPreMove],
+    [game, myColor, postMove, setPreMove],
   );
 
   const onPreMove = useCallback(
