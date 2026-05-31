@@ -103,6 +103,10 @@ export function MultiplayerGameClient({
   // ─── Realtime: subscribe to the game's UPDATE events ─────────────────
   useEffect(() => {
     const supabase = createClient();
+    // Diagnostic logs while we shake out sync issues. Cheap; remove later.
+    const log = (...args: unknown[]) =>
+      console.log("[mp]", new Date().toISOString().slice(11, 23), ...args);
+
     const channel = supabase
       .channel(`mp:${game.id}`)
       .on(
@@ -114,21 +118,33 @@ export function MultiplayerGameClient({
           filter: `id=eq.${game.id}`,
         },
         (payload) => {
-          setGame(payload.new as MultiplayerGame);
+          const next = payload.new as MultiplayerGame;
+          log("UPDATE", {
+            status: next.status,
+            fen: next.fen,
+            updated_at: next.updated_at,
+          });
+          setGame(next);
         },
       )
-      .subscribe((status) => {
-        // On (re)connect, pull the latest row to fill any gap between when
-        // we mounted and when the subscription actually came online.
-        if (status === "SUBSCRIBED") void refetch();
+      .subscribe((status, err) => {
+        log("channel status:", status, err?.message ?? "");
+        if (status === "SUBSCRIBED") {
+          log("→ refetching to backfill any missed events");
+          void refetch();
+        }
       });
 
     // Refetch when the tab regains focus or the network reconnects, in case
     // the channel dropped silently in the background.
-    const onFocus = () => void refetch();
+    const onFocus = () => {
+      log("focus/online → refetch");
+      void refetch();
+    };
     window.addEventListener("focus", onFocus);
     window.addEventListener("online", onFocus);
     return () => {
+      log("teardown channel");
       void supabase.removeChannel(channel);
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("online", onFocus);
@@ -181,6 +197,17 @@ export function MultiplayerGameClient({
     const id = setInterval(() => setNow(Date.now()), 100);
     return () => clearInterval(id);
   }, [game.status, game.time_initial_ms]);
+
+  // ─── Safety-net polling fallback ─────────────────────────────────────
+  // Realtime is best-effort: dropped WS frames, RLS edge cases, browser
+  // throttling, etc. can leave the game desynced. A low-frequency refetch
+  // bounds the worst-case lag at ~3 seconds when in-progress, regardless of
+  // Realtime health. Cheap (one indexed lookup) and forgiving.
+  useEffect(() => {
+    if (game.status !== "in_progress") return;
+    const id = setInterval(() => void refetch(), 3000);
+    return () => clearInterval(id);
+  }, [game.status, refetch]);
 
   // ─── Sound on new move ───────────────────────────────────────────────
   useEffect(() => {
