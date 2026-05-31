@@ -52,7 +52,19 @@ export function MultiplayerGameClient({
 }: Props) {
   const router = useRouter();
   const [game, setGame] = useState<MultiplayerGame>(initialGame);
-  const [now, setNow] = useState<number>(() => Date.now());
+  // `now` MUST be deterministic on the first render — using Date.now() in the
+  // initializer would mismatch between server and client (React #418) and
+  // re-mount the subtree, which has the lovely side-effect of tearing down
+  // the Realtime channel mid-game. We seed it to clock_running_since (so
+  // elapsed = 0 → clocks display stored values), then snap to real wall time
+  // in the mount effect below.
+  const [now, setNow] = useState<number>(() =>
+    initialGame.clock_running_since
+      ? Date.parse(initialGame.clock_running_since)
+      : 0,
+  );
+  // Same pattern for the share URL — window isn't available during SSR.
+  const [shareHref, setShareHref] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Track which (if any) named action is in-flight, so we can disable the
@@ -156,6 +168,12 @@ export function MultiplayerGameClient({
       cancelled = true;
     };
   }, [game.id, game.status, myColor]);
+
+  // ─── Snap to real wall time / origin after mount (post-hydration) ────
+  useEffect(() => {
+    setNow(Date.now());
+    setShareHref(`${window.location.origin}/mp/${game.id}`);
+  }, [game.id]);
 
   // ─── Tick `now` for live clock display ───────────────────────────────
   useEffect(() => {
@@ -377,14 +395,9 @@ export function MultiplayerGameClient({
         ? game.black_elo_after
         : null;
 
-  function shareUrl() {
-    if (typeof window === "undefined") return "";
-    return `${window.location.origin}/mp/${game.id}`;
-  }
-
   async function copyShare() {
     try {
-      await navigator.clipboard.writeText(shareUrl());
+      await navigator.clipboard.writeText(shareHref);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -460,7 +473,7 @@ export function MultiplayerGameClient({
               <div className="mt-3 flex gap-2">
                 <input
                   readOnly
-                  value={shareUrl()}
+                  value={shareHref}
                   className="flex-1 truncate rounded-lg border border-panel-border bg-background px-3 py-2 text-sm"
                   onFocus={(e) => e.currentTarget.select()}
                 />
