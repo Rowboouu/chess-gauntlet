@@ -63,7 +63,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Not a participant" }, { status: 403 });
   }
 
-  const chess = new Chess(game.fen);
+  // Load the FULL game history from PGN so chess.pgn() after the move
+  // emits a complete game record — not a fresh [SetUp]-rooted PGN with just
+  // the one move (which was happening on every move after the first and
+  // corrupting the PGN trail).
+  const chess = new Chess();
+  if (game.pgn && game.pgn.trim().length > 0) {
+    try {
+      chess.loadPgn(game.pgn);
+    } catch {
+      chess.load(game.fen);
+    }
+  } else {
+    chess.load(game.fen);
+  }
   if (chess.turn() !== myColor) {
     return NextResponse.json({ error: "Not your turn" }, { status: 409 });
   }
