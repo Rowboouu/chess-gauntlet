@@ -107,36 +107,61 @@ export function MultiplayerGameClient({
     const log = (...args: unknown[]) =>
       console.log("[mp]", new Date().toISOString().slice(11, 23), ...args);
 
-    const channel = supabase
-      .channel(`mp:${game.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "multiplayer_games",
-          filter: `id=eq.${game.id}`,
-        },
-        (payload) => {
-          const next = payload.new as MultiplayerGame;
-          log("UPDATE", {
-            status: next.status,
-            fen: next.fen,
-            updated_at: next.updated_at,
-          });
-          setGame(next);
-        },
-      )
-      .subscribe((status, err) => {
-        log("channel status:", status, err?.message ?? "");
-        if (status === "SUBSCRIBED") {
-          log("→ refetching to backfill any missed events");
-          void refetch();
-        }
-      });
+    let cancelled = false;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+    let unsubAuth: (() => void) | null = null;
 
-    // Refetch when the tab regains focus or the network reconnects, in case
-    // the channel dropped silently in the background.
+    (async () => {
+      // CRITICAL: hand the user's JWT to the Realtime client BEFORE subscribing.
+      // Without this, RLS evaluates events as anonymous (auth.uid() = null),
+      // so our SELECT policy returns false for in_progress games and every
+      // UPDATE gets silently filtered out — channel looks healthy, zero events.
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (cancelled) return;
+      if (session?.access_token) {
+        log("setAuth: have session, length", session.access_token.length);
+        await supabase.realtime.setAuth(session.access_token);
+      } else {
+        log("setAuth: NO session — Realtime will be anonymous");
+      }
+
+      // Keep Realtime's JWT fresh if it gets refreshed mid-game.
+      const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+        if (s?.access_token) void supabase.realtime.setAuth(s.access_token);
+      });
+      unsubAuth = () => sub.subscription.unsubscribe();
+
+      channel = supabase
+        .channel(`mp:${game.id}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "UPDATE",
+            schema: "public",
+            table: "multiplayer_games",
+            filter: `id=eq.${game.id}`,
+          },
+          (payload) => {
+            const next = payload.new as MultiplayerGame;
+            log("UPDATE", {
+              status: next.status,
+              fen: next.fen,
+              updated_at: next.updated_at,
+            });
+            setGame(next);
+          },
+        )
+        .subscribe((status, err) => {
+          log("channel status:", status, err?.message ?? "");
+          if (status === "SUBSCRIBED") {
+            log("→ refetching to backfill any missed events");
+            void refetch();
+          }
+        });
+    })();
+
     const onFocus = () => {
       log("focus/online → refetch");
       void refetch();
@@ -144,8 +169,10 @@ export function MultiplayerGameClient({
     window.addEventListener("focus", onFocus);
     window.addEventListener("online", onFocus);
     return () => {
+      cancelled = true;
       log("teardown channel");
-      void supabase.removeChannel(channel);
+      if (channel) void supabase.removeChannel(channel);
+      if (unsubAuth) unsubAuth();
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("online", onFocus);
     };
