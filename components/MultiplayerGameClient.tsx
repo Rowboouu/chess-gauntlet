@@ -17,6 +17,26 @@ import type { MultiplayerGame, PieceColor, Profile } from "@/lib/types";
 
 type MiniProfile = Pick<Profile, "id" | "username" | "elo">;
 
+/**
+ * Decide whether `next` is fresh enough to apply over `prev`.
+ *
+ * We compare PGN length rather than `updated_at`: an optimistic local move
+ * sets updated_at to the *client's* clock, which is usually slightly ahead of
+ * the server's clock — a timestamp guard would then reject the legitimate
+ * server confirmation. PGN is monotonic by move count: a state with strictly
+ * more PGN content can only be newer, and equal-length states are the same
+ * move from different sources (broadcast vs. postgres_changes vs. refetch)
+ * which are all safe to apply.
+ *
+ * The status check is the one case where PGN doesn't change but the state
+ * does — e.g. game completed via resignation — so we let any status change
+ * through regardless.
+ */
+function isFresherOrEqual(next: MultiplayerGame, prev: MultiplayerGame): boolean {
+  if (next.status !== prev.status) return true;
+  return next.pgn.length >= prev.pgn.length;
+}
+
 function initialMoveCount(pgn: string): number {
   if (!pgn) return 0;
   const c = new Chess();
@@ -89,6 +109,11 @@ export function MultiplayerGameClient({
   // ─── Refetch helper: belt-and-braces sync against the DB ────────────
   // Postgres-changes doesn't backfill events fired before SUBSCRIBED, so we
   // refetch the row on subscribe, on window focus, and on channel reconnect.
+  //
+  // CRITICAL: this must NOT trample an optimistic local update. If we made a
+  // move 50ms ago and the server hasn't finished writing yet, refetch will
+  // pull the OLD row — without a freshness guard we'd visibly snap the piece
+  // back to its original square until the broadcast catches up.
   const gameIdRef = useRef(initialGame.id);
   const refetch = useCallback(async () => {
     const supabase = createClient();
@@ -97,7 +122,8 @@ export function MultiplayerGameClient({
       .select("*")
       .eq("id", gameIdRef.current)
       .single<MultiplayerGame>();
-    if (data) setGame(data);
+    if (!data) return;
+    setGame((prev) => (isFresherOrEqual(data, prev) ? data : prev));
   }, []);
 
   // ─── Realtime: subscribe to the game's UPDATE events ─────────────────
@@ -145,14 +171,7 @@ export function MultiplayerGameClient({
             fen: next.fen,
             updated_at: next.updated_at,
           });
-          // Only apply if it's newer than what we have (the postgres_changes
-          // echo and broadcast can race).
-          setGame((prev) =>
-            new Date(next.updated_at).getTime() >
-            new Date(prev.updated_at).getTime()
-              ? next
-              : prev,
-          );
+          setGame((prev) => (isFresherOrEqual(next, prev) ? next : prev));
         })
         // Slow path / persistence confirmation — still useful for full-state
         // sanity and for clients that join after a broadcast.
@@ -171,12 +190,7 @@ export function MultiplayerGameClient({
               fen: next.fen,
               updated_at: next.updated_at,
             });
-            setGame((prev) =>
-              new Date(next.updated_at).getTime() >
-              new Date(prev.updated_at).getTime()
-                ? next
-                : prev,
-            );
+            setGame((prev) => (isFresherOrEqual(next, prev) ? next : prev));
           },
         )
         .subscribe((status, err) => {
