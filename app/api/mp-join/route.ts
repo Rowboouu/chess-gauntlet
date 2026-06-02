@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { joinWaitingGame } from "@/lib/multiplayer-server";
+import { enforceRateLimit } from "@/lib/rate-limit";
 import type { MultiplayerGame } from "@/lib/types";
 
 export const preferredRegion = "sin1";
@@ -27,6 +28,13 @@ export async function POST(request: NextRequest) {
   }
 
   const admin = createAdminClient();
+  const limited = await enforceRateLimit(admin, user.id, {
+    bucket: "mp_join",
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (limited) return limited;
+
   const { data: game, error: gErr } = await admin
     .from("multiplayer_games")
     .select("*")

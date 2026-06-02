@@ -121,8 +121,8 @@ export function GameClient({ game, bot }: { game: Game; bot: BotLevel }) {
   return (
     <>
       <AppHeader right={<SoundToggle />} />
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 lg:flex-row lg:items-start">
-        <div className="mx-auto w-full max-w-[min(90vw,640px)] lg:flex-1">
+      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-4 sm:py-6 lg:flex-row lg:items-start">
+        <div className="mx-auto w-full max-w-[min(96vw,640px)] lg:flex-1">
           <Board
             fen={state.fen}
             orientation={game.player_color === "w" ? "white" : "black"}

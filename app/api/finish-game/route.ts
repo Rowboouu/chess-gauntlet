@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { Chess } from "chess.js";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
+import { enforceRateLimit } from "@/lib/rate-limit";
 import type { GameResult } from "@/lib/elo";
 import type { Game, PieceColor, Profile } from "@/lib/types";
 
@@ -35,6 +36,14 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing gameId or pgn" }, { status: 400 });
   }
 
+  const admin = createAdminClient();
+  const limited = await enforceRateLimit(admin, user.id, {
+    bucket: "finish_game",
+    limit: 30,
+    windowMs: 60_000,
+  });
+  if (limited) return limited;
+
   // Fetch the game under the caller's session (RLS ensures ownership).
   const { data: game, error: gameErr } = await supabase
     .from("games")
@@ -65,7 +74,6 @@ export async function POST(request: NextRequest) {
   const result = resultFor(chess, game.player_color);
 
   // Apply atomically via the locked-down RPC (service role only).
-  const admin = createAdminClient();
   const { data: profile, error: rpcErr } = await admin
     .rpc("finish_game", { p_game_id: gameId, p_result: result })
     .single<Profile>();

@@ -46,7 +46,7 @@ export function GameStatus({
   }
 
   return (
-    <div className="flex w-full flex-col gap-4 lg:w-72">
+    <div className="flex w-full flex-col gap-3 sm:gap-4 lg:w-72">
       {/* Opponent card */}
       <div className="rounded-xl border border-panel-border bg-panel p-4">
         <p className="text-xs uppercase tracking-wider text-muted">
@@ -76,7 +76,7 @@ export function GameStatus({
         <div className="border-b border-panel-border px-4 py-2 text-xs uppercase tracking-wider text-muted">
           Moves
         </div>
-        <ol className="max-h-48 overflow-y-auto px-2 py-1 font-mono text-sm lg:max-h-[22rem]">
+        <ol className="max-h-40 overflow-y-auto px-2 py-1 font-mono text-sm sm:max-h-48 lg:max-h-88">
           {rows.length === 0 && (
             <li className="px-2 py-2 text-muted">No moves yet.</li>
           )}
@@ -100,7 +100,7 @@ export function GameStatus({
           </p>
           <p className="mt-1 text-sm text-muted">{state.endReason}</p>
 
-          <div className="mt-3 min-h-[1.5rem] text-sm">
+          <div className="mt-3 min-h-6 text-sm">
             {finishState === "saving" && (
               <span className="text-muted">Updating Elo…</span>
             )}

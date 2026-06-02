@@ -18,9 +18,23 @@ const MUTE_KEY = "chess-gauntlet:muted";
 
 let ctx: AudioContext | null = null;
 let muted = false;
+// Chrome (and friends) block AudioContext until the user has interacted with
+// the page. Creating one beforehand still emits a noisy "AudioContext was not
+// allowed to start" warning — even when nothing happens. We gate creation
+// behind the first pointer/key/touch event so the warning never appears.
+let userInteracted = false;
 
 if (typeof window !== "undefined") {
   muted = window.localStorage.getItem(MUTE_KEY) === "1";
+  const onInteract = () => {
+    userInteracted = true;
+    window.removeEventListener("pointerdown", onInteract);
+    window.removeEventListener("keydown", onInteract);
+    window.removeEventListener("touchstart", onInteract);
+  };
+  window.addEventListener("pointerdown", onInteract, { capture: true });
+  window.addEventListener("keydown", onInteract, { capture: true });
+  window.addEventListener("touchstart", onInteract, { capture: true });
 }
 
 export function isMuted() {
@@ -36,6 +50,9 @@ export function setMuted(value: boolean) {
 
 function audio(): AudioContext | null {
   if (typeof window === "undefined") return null;
+  // Don't even try until the user has interacted — otherwise the browser
+  // logs a loud autoplay-policy warning every time a sound is queued.
+  if (!userInteracted) return null;
   if (!ctx) {
     const Ctor =
       window.AudioContext ||
@@ -44,7 +61,7 @@ function audio(): AudioContext | null {
     if (!Ctor) return null;
     ctx = new Ctor();
   }
-  if (ctx.state === "suspended") void ctx.resume();
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
   return ctx;
 }
 

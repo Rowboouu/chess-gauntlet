@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { getTimeControl } from "@/lib/timeControls";
 import { START_FEN } from "@/lib/multiplayer";
+import { enforceRateLimit } from "@/lib/rate-limit";
 import type { PieceColor, Profile } from "@/lib/types";
 
 export const preferredRegion = "sin1";
@@ -23,6 +24,14 @@ export async function POST(request: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
+
+  const admin = createAdminClient();
+  const limited = await enforceRateLimit(admin, user.id, {
+    bucket: "mp_create",
+    limit: 10,
+    windowMs: 60_000,
+  });
+  if (limited) return limited;
 
   const body = await request.json().catch(() => null);
   const tc = getTimeControl(body?.time_control_id);
@@ -50,7 +59,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Profile not found" }, { status: 404 });
   }
 
-  const admin = createAdminClient();
   const { data, error } = await admin
     .from("multiplayer_games")
     .insert({

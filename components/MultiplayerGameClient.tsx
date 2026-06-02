@@ -129,10 +129,6 @@ export function MultiplayerGameClient({
   // ─── Realtime: subscribe to the game's UPDATE events ─────────────────
   useEffect(() => {
     const supabase = createClient();
-    // Diagnostic logs while we shake out sync issues. Cheap; remove later.
-    const log = (...args: unknown[]) =>
-      console.log("[mp]", new Date().toISOString().slice(11, 23), ...args);
-
     let cancelled = false;
     let channel: ReturnType<typeof supabase.channel> | null = null;
     let unsubAuth: (() => void) | null = null;
@@ -147,10 +143,7 @@ export function MultiplayerGameClient({
       } = await supabase.auth.getSession();
       if (cancelled) return;
       if (session?.access_token) {
-        log("setAuth: have session, length", session.access_token.length);
         await supabase.realtime.setAuth(session.access_token);
-      } else {
-        log("setAuth: NO session — Realtime will be anonymous");
       }
 
       // Keep Realtime's JWT fresh if it gets refreshed mid-game.
@@ -166,11 +159,6 @@ export function MultiplayerGameClient({
         // postgres_changes echo below.
         .on("broadcast", { event: "state" }, (msg) => {
           const next = msg.payload as MultiplayerGame;
-          log("BROADCAST", {
-            status: next.status,
-            fen: next.fen,
-            updated_at: next.updated_at,
-          });
           setGame((prev) => (isFresherOrEqual(next, prev) ? next : prev));
         })
         // Slow path / persistence confirmation — still useful for full-state
@@ -185,32 +173,21 @@ export function MultiplayerGameClient({
           },
           (payload) => {
             const next = payload.new as MultiplayerGame;
-            log("UPDATE", {
-              status: next.status,
-              fen: next.fen,
-              updated_at: next.updated_at,
-            });
             setGame((prev) => (isFresherOrEqual(next, prev) ? next : prev));
           },
         )
-        .subscribe((status, err) => {
-          log("channel status:", status, err?.message ?? "");
-          if (status === "SUBSCRIBED") {
-            log("→ refetching to backfill any missed events");
-            void refetch();
-          }
+        .subscribe((status) => {
+          // Postgres-changes doesn't backfill events from before SUBSCRIBED;
+          // pull the latest row on subscribe (and on reconnect) to be safe.
+          if (status === "SUBSCRIBED") void refetch();
         });
     })();
 
-    const onFocus = () => {
-      log("focus/online → refetch");
-      void refetch();
-    };
+    const onFocus = () => void refetch();
     window.addEventListener("focus", onFocus);
     window.addEventListener("online", onFocus);
     return () => {
       cancelled = true;
-      log("teardown channel");
       if (channel) void supabase.removeChannel(channel);
       if (unsubAuth) unsubAuth();
       window.removeEventListener("focus", onFocus);
@@ -298,11 +275,25 @@ export function MultiplayerGameClient({
 
   // ─── Pre-move execution: when it becomes my turn, fire the queued move
   const postMove = useCallback(
-    async (from: string, to: string, promotion?: string) => {
+    async (
+      from: string,
+      to: string,
+      promotion?: string,
+      clientTs?: number,
+    ) => {
       const res = await fetch("/api/mp-move", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ gameId: game.id, from, to, promotion }),
+        body: JSON.stringify({
+          gameId: game.id,
+          from,
+          to,
+          promotion,
+          // The wall-clock moment the player actually moved on this device.
+          // The server uses this (bounded) for clock deduction so the player
+          // isn't charged for upload latency on every move.
+          client_ts: clientTs ?? Date.now(),
+        }),
       });
       if (!res.ok) {
         // The optimistic local state diverged from the server (e.g. opponent
@@ -416,7 +407,10 @@ export function MultiplayerGameClient({
         updated_at: nowStr,
       }));
       setPreMove(null);
-      void postMove(from, to, promotion);
+      // Pass the SAME wall-clock moment the optimistic state was based on,
+      // so the server stamps clock_running_since identically — no snap-back
+      // when the echo arrives.
+      void postMove(from, to, promotion, nowDate.getTime());
       return true;
     },
     [game, myColor, postMove, setPreMove],
@@ -546,8 +540,8 @@ export function MultiplayerGameClient({
   return (
     <>
       <AppHeader right={<SoundToggle />} />
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-6 lg:flex-row lg:items-start">
-        <div className="mx-auto w-full max-w-[min(90vw,640px)] lg:flex-1">
+      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-3 px-3 py-3 sm:gap-6 sm:px-4 sm:py-6 lg:flex-row lg:items-start">
+        <div className="mx-auto w-full max-w-[min(96vw,640px)] lg:flex-1">
           <div className="mb-2">
             <PlayerStrip
               profile={topProfile}
@@ -594,7 +588,21 @@ export function MultiplayerGameClient({
           </div>
         </div>
 
-        <aside className="flex w-full flex-col gap-4 lg:w-72">
+        <aside className="flex w-full flex-col gap-3 sm:gap-4 lg:w-72">
+          {/* Spectator banner — visible when you're watching someone else's game */}
+          {!myColor && game.status !== "waiting" && (
+            <div className="rounded-xl border border-panel-border bg-panel p-3 text-center">
+              <p className="text-xs uppercase tracking-wider text-muted">
+                Spectating
+              </p>
+              <p className="mt-1 text-sm">
+                {game.status === "completed"
+                  ? "Game over — read-only view."
+                  : "Live game — read-only."}
+              </p>
+            </div>
+          )}
+
           {/* Status / waiting room */}
           {game.status === "waiting" && (
             <div className="rounded-xl border border-panel-border bg-panel p-4">

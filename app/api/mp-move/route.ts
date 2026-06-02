@@ -32,6 +32,7 @@ export async function POST(request: NextRequest) {
     from?: string;
     to?: string;
     promotion?: string;
+    client_ts?: number;
   };
   const { gameId, from, to } = body;
   if (!gameId || !from || !to) {
@@ -84,6 +85,18 @@ export async function POST(request: NextRequest) {
   // --- Clock: deduct elapsed since the side-to-move's clock started. -----
   const now = new Date();
   const nowMs = now.getTime();
+  // Use the client-claimed move timestamp (bounded) so the player isn't
+  // charged for upload latency on every move. Max ±250ms in the past from
+  // server time — within that band the client gets the snap-back-free
+  // experience; beyond it, server time wins (anti-cheat fallback).
+  const CLOCK_TS_BOUND_MS = 250;
+  const rawClientTs =
+    typeof body.client_ts === "number" ? body.client_ts : null;
+  const effectiveMoveMs =
+    rawClientTs !== null
+      ? Math.max(nowMs - CLOCK_TS_BOUND_MS, Math.min(nowMs, rawClientTs))
+      : nowMs;
+  const effectiveMoveDate = new Date(effectiveMoveMs);
   const timed = game.time_initial_ms > 0;
   let newWhiteMs = game.white_time_ms;
   let newBlackMs = game.black_time_ms;
@@ -92,8 +105,8 @@ export async function POST(request: NextRequest) {
   if (timed) {
     const startedAt = game.clock_running_since
       ? new Date(game.clock_running_since).getTime()
-      : nowMs;
-    const elapsed = Math.max(0, nowMs - startedAt);
+      : effectiveMoveMs;
+    const elapsed = Math.max(0, effectiveMoveMs - startedAt);
     if (myColor === "w") {
       newWhiteMs = game.white_time_ms - elapsed;
       if (newWhiteMs <= 0) {
@@ -154,10 +167,12 @@ export async function POST(request: NextRequest) {
     pgn: chess.pgn(),
     white_time_ms: newWhiteMs,
     black_time_ms: newBlackMs,
-    // The opponent's clock starts now (or stops if the game just ended).
-    clock_running_since: (terminal || !timed ? null : now.toISOString()) as
-      | string
-      | null,
+    // Opponent's clock starts from when the player ACTUALLY moved (bounded
+    // client timestamp), so both sides' clocks agree without a snap-back
+    // when the broadcast echoes back to the mover.
+    clock_running_since: (terminal || !timed
+      ? null
+      : effectiveMoveDate.toISOString()) as string | null,
     draw_offer_by: null,
     updated_at: now.toISOString(),
   };
